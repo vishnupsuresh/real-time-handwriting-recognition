@@ -1,0 +1,10 @@
+# downloaded by scripts/download_assets.sh
+fonts/
+data/
+# training outputs (large binaries; share via GitHub Releases if needed)
+checkpoints/
+*.pt
+train.log
+__pycache__/
+*.pyc
+.venv/
