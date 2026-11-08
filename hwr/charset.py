@@ -26,6 +26,17 @@ def encode(text: str) -> list[int]:
     return [CHAR2IDX[c] for c in text if c in CHAR2IDX]
 
 
+def ctc_min_len(text: str) -> int:
+    """Fewest output frames CTC needs for this label.
+
+    One frame per character plus one blank between each pair of identical
+    neighbors ("ll" needs l, blank, l). If the model outputs fewer frames the
+    sample cannot be aligned and its loss is infinite.
+    """
+    ids = encode(text)
+    return len(ids) + sum(a == b for a, b in zip(ids, ids[1:]))
+
+
 def greedy_decode(indices) -> str:
     """Best-path CTC decoding: collapse repeats, then remove blanks.
 
