@@ -56,11 +56,13 @@ def list_fonts(split: str) -> list[tuple[Path, str]]:
     return out
 
 
-def random_text(max_words: int = 4) -> str:
+def random_text(max_words: int = 8) -> str:
     """Random phrase with mixed case, digits and punctuation.
 
     A word list is used instead of uniform random characters so the model also
     picks up English letter statistics, which helps on ambiguous cursive joins.
+    Up to 8 words so the model sees full-length lines like real notes (an
+    earlier version used 4, and long webcam lines read worse).
     """
     words = []
     for _ in range(random.randint(1, max_words)):
@@ -72,7 +74,8 @@ def random_text(max_words: int = 4) -> str:
             r2 = random.random()
             if r2 < 0.25:
                 w = w.capitalize()
-            elif r2 < 0.30:
+            elif r2 < 0.40:
+                # 15% all caps (was 5%): the model was lowercasing capitals.
                 w = w.upper()
         if random.random() < 0.12:
             w += random.choice(list(".,;:!?"))
@@ -80,6 +83,21 @@ def random_text(max_words: int = 4) -> str:
             w = random.choice(['"', "'", "("]) + w + random.choice(['"', "'", ")"])
         words.append(w)
     return " ".join(words)
+
+
+def vary_spacing(text: str) -> str:
+    """Widen some word gaps for rendering only; the label keeps single spaces.
+
+    Handwritten word gaps vary a lot. Training only on a font's fixed space
+    width made the model drop spaces when gaps were unusual ("F0shell").
+    Weakness: gaps can only grow, not shrink below one space. Fix: render
+    word by word with a random (also negative) offset between words.
+    """
+    words = text.split(" ")
+    out = words[0]
+    for w in words[1:]:
+        out += " " * random.choice([1, 1, 1, 2, 3]) + w
+    return out
 
 
 def _elastic(img: np.ndarray, alpha: float, sigma: float) -> np.ndarray:
