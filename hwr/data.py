@@ -12,11 +12,43 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .charset import CHAR2IDX, encode
-from .synth import list_fonts, random_text, render
+from .charset import CHAR2IDX, ctc_min_len, encode
+from .synth import list_fonts, random_text, render, vary_spacing
 
 IMG_H = 32       # small height keeps CPU training feasible; 64 is better on GPU
-MAX_W = 512      # caps memory per batch; longer lines are downscaled
+MAX_W = 1024     # fits 8-word lines without squeezing; was 512 for 4-word lines
+
+
+def binarize(gray: np.ndarray) -> np.ndarray:
+    """Adaptive threshold: dark ink -> 0, paper -> 255.
+
+    Shared by training augmentation, live.py and predict.py so the model sees
+    the same kind of black-and-white image at inference as in training.
+    Adaptive (local) thresholding copes with shadows and uneven room light,
+    which a single global threshold cannot.
+    """
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    return cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                 cv2.THRESH_BINARY, 31, 15)
+
+
+def compress_gaps(img: np.ndarray, max_gap: float = 0.8) -> np.ndarray:
+    """Shrink blank column runs wider than max_gap * height (dark ink on light).
+
+    When live.py merges words far apart on one line, the crop contains a long
+    empty stretch the model never saw in training, and it starts merging
+    words ("meet me at noon" -> "meet meat non"). Cutting every gap down to
+    a normal word space fixes that without changing the text.
+    """
+    h = img.shape[0]
+    ink = (img < 128).any(axis=0)
+    limit = max(int(max_gap * h), 1)
+    keep, run = np.ones(img.shape[1], bool), 0
+    for x, has_ink in enumerate(ink):
+        run = 0 if has_ink else run + 1
+        if run > limit:
+            keep[x] = False
+    return img[:, keep]
 
 
 def preprocess(img: np.ndarray, train: bool = False) -> np.ndarray:
@@ -53,7 +85,12 @@ class SynthLines(Dataset):
             np.random.seed((self.seed + i) % 2**32)
         font, style = random.choice(self.fonts)
         text = random_text()
-        img = render(text, font, augment=True)
+        img = render(vary_spacing(text), font, augment=True)
+        # 30% binarized so the model also learns the black-and-white input
+        # that live.py and predict.py feed it. Validation stays grayscale so
+        # scores are comparable with earlier runs.
+        if self.train and random.random() < 0.3:
+            img = binarize(img)
         return preprocess(img, train=self.train), text, style
 
 
@@ -92,9 +129,27 @@ class IAMLines(Dataset):
         return preprocess(img, train=self.train), text, "iam"
 
 
+def ensure_min_width(img: np.ndarray, text: str, frame_px: int = 4) -> np.ndarray:
+    """Widen img so the model outputs at least ctc_min_len(text) frames.
+
+    frame_px matches CRNN.DOWNSAMPLE (not imported, to avoid a circular
+    import; tests/test_core.py checks the two stay equal). One spare frame per
+    5 characters leaves room for blanks between letters.
+    """
+    need = ctc_min_len(text)
+    min_w = (need + need // 5 + 1) * frame_px
+    if img.shape[1] >= min_w:
+        return img
+    return cv2.resize(img, (min_w, img.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
 def collate(batch):
     """Pad images to the widest in the batch and flatten labels for CTCLoss."""
     imgs, texts, styles = zip(*batch)
+    # Stretch images too narrow for their label. Very condensed writing can
+    # make letters thinner than one output frame (4 px), which CTC cannot
+    # align; without this ~0.7% of synthetic samples were silently skipped.
+    imgs = [ensure_min_width(im, t) for im, t in zip(imgs, texts)]
     max_w = max(im.shape[1] for im in imgs)
     x = torch.zeros(len(imgs), 1, IMG_H, max_w)
     widths = []
