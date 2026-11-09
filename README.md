@@ -1,23 +1,35 @@
-# Handwriting Recognition (print + cursive)
+# Real-Time Handwriting Recognition (print + cursive)
 
-Line-level handwritten text recognition with a CRNN (CNN + BiLSTM) trained with CTC loss.
+Line-level handwritten text recognition with a CRNN (CNN + BiLSTM) trained with CTC loss, plus a live webcam reader.
 
 ## How it works
 
 | Stage | What it does | File |
 |---|---|---|
-| Synthetic data | Renders random English phrases with 20 print and 25 cursive handwriting fonts (Google Fonts, OFL/Apache), then applies slant, rotation, elastic distortion, stroke-width change, blur and noise | `hwr/synth.py` |
+| Synthetic data | Renders random 1 to 8 word English phrases with 19 print and 26 cursive handwriting fonts (Google Fonts, OFL/Apache), with random word gaps, then applies slant, rotation, elastic distortion, stroke-width change, blur, noise and (30%) binarization | `hwr/synth.py`, `hwr/data.py` |
 | Preprocessing | Crop to ink, resize to height 32 (aspect kept), invert so ink = 1 | `hwr/data.py` |
 | Model | 7 conv layers reduce a 32 × W image to W/4 feature columns; 2-layer BiLSTM; linear layer over 80 classes (79 chars + blank). 2.07M params | `hwr/model.py` |
 | Loss | CTC aligns per-column predictions with the label, so no per-character boxes are needed | `train.py` |
-| Decoding | Greedy CTC: argmax per column, collapse repeats, drop blanks | `hwr/charset.py` |
+| Decoding | Greedy CTC (default), or prefix beam search with a character bigram LM (`--beam`) | `hwr/charset.py`, `hwr/decode.py` |
+| Live reader | Adaptive threshold, line detection, same-line box merging, gap compression, batched inference, frame smoothing | `live.py` |
 
-Output length T = W / 4. CTC requires T ≥ label length + number of repeated adjacent characters, which holds for normal letter widths at height 32.
+Output length T = ⌊W / 4⌋. CTC needs T ≥ |label| + (number of repeated adjacent characters); `collate` stretches any image that is too narrow.
 
-Validation uses 7 **held-out fonts** (3 print, 4 cursive) to measure generalization to unseen styles, reported separately:
+Validation uses 7 **held-out fonts** (3 print, 4 cursive) to measure generalization to unseen styles:
 
-- CER = edit distance(prediction, reference) / len(reference)
+- CER = edit distance(prediction, reference) / |reference|
 - WER = word-level edit distance / number of reference words
+
+## Results (v0.2, 10 epochs, held-out fonts, greedy decoding)
+
+| | Print | Cursive |
+|---|---|---|
+| CER | 4.7% | 7.6% |
+| WER | 20.9% | 30.5% |
+
+These are on synthetic validation lines. Expect higher error on real handwriting until the model is fine-tuned on real data (see below).
+
+Beam search with the character bigram LM changed CER by only 0.1 to 0.3% in testing, within noise, so greedy is the default. A word-level LM is needed for real gains.
 
 ## Usage
 
@@ -25,20 +37,28 @@ Validation uses 7 **held-out fonts** (3 print, 4 cursive) to measure generalizat
 pip install -r requirements.txt
 bash scripts/download_assets.sh   # fonts + word list (not stored in git)
 
-# train on synthetic data (CPU: ~7 min/epoch; GPU much faster)
+# download the trained model
+mkdir -p checkpoints
+curl -L -o checkpoints/best.pt https://github.com/vishnupsuresh/real-time-handwriting-recognition/releases/latest/download/best.pt
+
+# train on synthetic data (Apple Silicon GPU or CUDA used automatically)
 python train.py --epochs 10
 
 # transcribe single-line images
-python predict.py checkpoints/best.pt line.png
+python predict.py checkpoints/best.pt line.png [--beam]
+
+# tests
+pip install -r requirements-dev.txt
+pytest -q
 ```
 
 ### Live webcam reader
 
 ```bash
-python live.py              # --camera 1 for an external webcam
+python live.py              # --camera 1 for an external webcam, --beam for beam search
 ```
 
-Hold handwriting inside the green box. Each line is detected, read and drawn on screen (~30 ms per frame on a 2-core CPU). Keys: `q` quit, `space` freeze, `b` show the binarized view the model sees.
+Hold handwriting inside the green box. Each line is detected, read and drawn on screen (~30 ms per frame on a 2-core CPU with greedy decoding; beam search adds ~30 ms per line). Keys: `q` quit, `space` freeze, `b` show the binarized view the model sees.
 
 Tips: fill the box with the text, use dark pen on white paper, avoid glare, keep lines level.
 
@@ -55,9 +75,9 @@ Training then mixes IAM lines with synthetic lines (2:1) so cursive font styles 
 | Weakness | Fix |
 |---|---|
 | Fonts are not real handwriting; synthetic-only models drop sharply on real scans | Fine-tune on IAM / CVL / your own labeled lines |
-| Greedy decoding has no language knowledge | Beam search + n-gram LM (pyctcdecode + KenLM) |
-| Line input only; full pages fail | Add line segmentation (projection profiles or Kraken) |
-| Height 32 loses detail in small cursive loops | Use height 64 and one more pooling layer on GPU |
+| Character bigram LM barely helps (sees one previous letter only) | Word-level or 5-gram LM with pyctcdecode + KenLM |
+| Line tracking in `live.py` matches lines by order, so texts jump when a line appears or disappears | Match boxes across frames by overlap (IoU) |
+| Touching or strongly tilted lines merge or split | Deskew the ROI first, or use a learned line detector (Kraken, docTR) |
+| Height 32 loses detail in small cursive loops | Height 64 and one more pooling layer, trained on GPU |
 | IAM random split mixes writers across train/val | Use the official writer-independent split |
 | LSTM is sequential and slow on long lines | Transformer encoder, or TrOCR for best accuracy |
-| `predict.py` binarizes inputs, training images are grayscale | Add binarization as a training augmentation |
