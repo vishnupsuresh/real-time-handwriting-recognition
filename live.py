@@ -25,8 +25,9 @@ import numpy as np
 import torch
 
 from hwr.charset import greedy_decode
-from hwr.data import IMG_H, preprocess
-from hwr.model import CRNN
+from hwr.data import IMG_H, binarize, compress_gaps, preprocess
+from hwr.decode import beam_decode, default_lm
+from hwr.model import CRNN, load_model
 
 
 def find_lines(gray: np.ndarray, min_h: int = 12, min_w: int = 30):
@@ -47,28 +48,57 @@ def find_lines(gray: np.ndarray, min_h: int = 12, min_w: int = 30):
     merged = cv2.dilate(binary, cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 5)))
     contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = [cv2.boundingRect(c) for c in contours]
-    boxes = [b for b in boxes if b[3] >= min_h and b[2] >= min_w and b[2] > b[3]]
-    return sorted(boxes, key=lambda b: b[1]), binary
+    boxes = [b for b in boxes if b[3] >= min_h and b[2] >= min_w]
+    return merge_same_line(boxes), binary
+
+
+def merge_same_line(boxes):
+    """Join boxes that sit on the same text line.
+
+    A wide gap between words can split one line into several blobs. Sorting
+    those by top edge alone mixed up their order. Two boxes are on the same
+    line when their vertical ranges overlap by more than half the shorter
+    box's height; such boxes are merged into one, so words are read left to
+    right in a single crop.
+    """
+    boxes = sorted(boxes, key=lambda b: b[1] + b[3] / 2)
+    lines = []
+    for x, y, w, h in boxes:
+        for i, (lx, ly, lw, lh) in enumerate(lines):
+            overlap = min(y + h, ly + lh) - max(y, ly)
+            if overlap > 0.5 * min(h, lh):
+                x0, y0 = min(x, lx), min(y, ly)
+                lines[i] = (x0, y0, max(x + w, lx + lw) - x0, max(y + h, ly + lh) - y0)
+                break
+        else:
+            lines.append((x, y, w, h))
+    return sorted(lines, key=lambda b: b[1])
 
 
 @torch.no_grad()
-def read_lines(model, binary: np.ndarray, boxes):
-    """Batch all line crops through the model in one forward pass."""
+def read_lines(model, gray: np.ndarray, boxes, lm=None):
+    """Batch all line crops through the model in one forward pass.
+
+    Crops come from the grayscale image and are binarized with the same
+    function used as a training augmentation (hwr.data.binarize), so the
+    model sees the same kind of input it was trained on.
+    """
     if not boxes:
         return []
     crops = []
     for x, y, w, h in boxes:
         pad = 4
-        crop = binary[max(y - pad, 0): y + h + pad, max(x - pad, 0): x + w + pad]
-        # preprocess expects dark ink on light paper.
-        crops.append(preprocess(255 - crop))
+        crop = gray[max(y - pad, 0): y + h + pad, max(x - pad, 0): x + w + pad]
+        crops.append(preprocess(compress_gaps(binarize(crop))))
     max_w = max(c.shape[1] for c in crops)
     batch = torch.zeros(len(crops), 1, IMG_H, max_w)
     for i, c in enumerate(crops):
         batch[i, 0, :, : c.shape[1]] = torch.from_numpy(c)
-    preds = model(batch).argmax(-1)
+    logp = model(batch).log_softmax(-1)
     lens = CRNN.out_lengths(torch.tensor([c.shape[1] for c in crops]))
-    return [greedy_decode(p[:L]) for p, L in zip(preds, lens)]
+    if lm is not None:
+        return [beam_decode(lp[:L].numpy(), lm) for lp, L in zip(logp, lens)]
+    return [greedy_decode(lp[:L].argmax(-1)) for lp, L in zip(logp, lens)]
 
 
 class Smoother:
@@ -101,11 +131,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="checkpoints/best.pt")
     ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--beam", action="store_true",
+                    help="beam search + language model: fewer spelling errors, slower")
     args = ap.parse_args()
 
-    model = CRNN()
-    model.load_state_dict(torch.load(args.ckpt, map_location="cpu")["model"])
-    model.eval()
+    model = load_model(args.ckpt)
+    lm = default_lm() if args.beam else None
     torch.set_num_threads(2)  # leave CPU for camera capture and drawing
 
     cap = cv2.VideoCapture(args.camera)
@@ -129,7 +160,7 @@ def main():
 
         t0 = time.time()
         boxes, binary = find_lines(roi)
-        texts = smoother.update(read_lines(model, binary, boxes))
+        texts = smoother.update(read_lines(model, roi, boxes, lm))
         fps = 0.9 * fps + 0.1 / max(time.time() - t0, 1e-3)
 
         if show_bin:
