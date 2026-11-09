@@ -1,6 +1,9 @@
-torch>=2.2
-numpy
-opencv-python
-pillow
-fonttools
-editdistance
+# Pinned to the versions this project was tested with (macOS arm64, Python 3.13).
+# Pinning stops a future release from breaking the code. To upgrade, change a
+# version, run `pytest -q` and a short training run, then commit.
+torch==2.15.0
+numpy==2.5.4
+opencv-python==5.0.0.93
+pillow==13.0.0
+fonttools==4.68.0
+editdistance==0.8.1
