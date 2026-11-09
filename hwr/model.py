@@ -14,10 +14,12 @@ cap throughput. Fix: replace them with a small Transformer encoder or 1D
 convolutions; or move to a TrOCR-style vision transformer when a GPU and real
 data are available (higher accuracy, about 100x the parameters).
 """
+import warnings
+
 import torch
 import torch.nn as nn
 
-from .charset import NUM_CLASSES
+from .charset import CHARS, NUM_CLASSES
 
 
 def conv_bn(cin, cout, k=3, p=1):
@@ -53,3 +55,27 @@ class CRNN(nn.Module):
     def out_lengths(cls, widths: torch.Tensor) -> torch.Tensor:
         # MaxPool with stride 2 floors odd sizes, matching integer division.
         return widths // cls.DOWNSAMPLE
+
+
+def model_config() -> dict:
+    """Settings a checkpoint depends on. Saved with the weights."""
+    from .data import IMG_H  # local import avoids a circular import
+    return {"chars": CHARS, "img_h": IMG_H}
+
+
+def load_model(path: str, device: str = "cpu") -> CRNN:
+    """Load a checkpoint and refuse it if it was trained with other settings.
+
+    Without this check, changing CHARS or IMG_H makes old checkpoints load
+    without error but output garbage, because class indices or feature sizes
+    no longer mean the same thing.
+    """
+    ckpt = torch.load(path, map_location=device)
+    cfg = ckpt.get("config")
+    if cfg is None:
+        warnings.warn(f"{path} has no saved config (older checkpoint); assuming current settings.")
+    elif cfg != model_config():
+        raise ValueError(f"{path} was trained with {cfg}, code now uses {model_config()}")
+    model = CRNN().to(device)
+    model.load_state_dict(ckpt["model"])
+    return model.eval()
