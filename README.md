@@ -20,16 +20,16 @@ Validation uses 7 **held-out fonts** (3 print, 4 cursive) to measure generalizat
 - CER = edit distance(prediction, reference) / |reference|
 - WER = word-level edit distance / number of reference words
 
-## Results (v0.2, 10 epochs, held-out fonts, greedy decoding)
+## Results (v0.3, held-out fonts, greedy decoding)
+
+Validation: 2,000 synthetic lines (1 to 8 words) in 7 fonts never seen in training.
 
 | | Print | Cursive |
 |---|---|---|
-| CER | 4.7% | 7.6% |
-| WER | 20.9% | 30.5% |
+| CER | 4.2% | 8.9% |
+| WER | 20.1% | 37.0% |
 
-These are on synthetic validation lines. Expect higher error on real handwriting until the model is fine-tuned on real data (see below).
-
-Beam search with the character bigram LM changed CER by only 0.1 to 0.3% in testing, within noise, so greedy is the default. A word-level LM is needed for real gains.
+Compared with the previous model on the same set, CER dropped 42% (print) and 35% (cursive) after training on longer lines, more capitals, varied word spacing and binarized images.
 
 ## Usage
 
